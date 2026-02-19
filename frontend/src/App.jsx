@@ -1,38 +1,27 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import LiveChat from "./components/LiveChat";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:4000";
+const OPENAI_API_KEY = import.meta.env.VITE_OPENAI_API_KEY;
+const OPENAI_MODEL = import.meta.env.VITE_OPENAI_MODEL || "gpt-4o-mini";
+
+const questions = [
+  "Какой идеальный вечер для тебя?",
+  "Что для тебя важнее в отношениях: страсть или дружба?",
+  "Как ты показываешь заботу о близком человеке?",
+  "Твоя мечта о совместном путешествии?",
+  "Какие качества ты ценишь в партнере больше всего?"
+];
 
 function createEmptyAnswers(questionCount) {
   return Array.from({ length: questionCount }, () => "");
 }
 
 export default function App() {
-  const [questions, setQuestions] = useState([]);
-  const [playerOne, setPlayerOne] = useState([]);
-  const [playerTwo, setPlayerTwo] = useState([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [playerOne, setPlayerOne] = useState(createEmptyAnswers(questions.length));
+  const [playerTwo, setPlayerTwo] = useState(createEmptyAnswers(questions.length));
+  const [error, setError] = useState(OPENAI_API_KEY ? "" : "Укажите VITE_OPENAI_API_KEY для AI-анализа");
   const [result, setResult] = useState(null);
-
-  useEffect(() => {
-    async function loadQuestions() {
-      try {
-        const response = await fetch(`${API_URL}/api/questions`);
-        if (!response.ok) throw new Error("Не удалось загрузить вопросы");
-        const data = await response.json();
-        setQuestions(data.questions);
-        setPlayerOne(createEmptyAnswers(data.questions.length));
-        setPlayerTwo(createEmptyAnswers(data.questions.length));
-      } catch (err) {
-        setError(err.message);
-      } finally {
-        setIsLoading(false);
-      }
-    }
-
-    loadQuestions();
-  }, []);
+  const [isLoading, setIsLoading] = useState(false);
 
   const progress = useMemo(() => {
     const allAnswers = [...playerOne, ...playerTwo];
@@ -48,33 +37,95 @@ export default function App() {
   };
 
   const runBattle = async () => {
-    setError("");
+    setError(OPENAI_API_KEY ? "" : "Укажите VITE_OPENAI_API_KEY для AI-анализа");
+    setResult(null);
+
+    if (!OPENAI_API_KEY) {
+      return;
+    }
+
+    setIsLoading(true);
+
     try {
-      const response = await fetch(`${API_URL}/api/duel`, {
+      const payload = {
+        questions,
+        playerOne,
+        playerTwo,
+        outputSchema: {
+          compatibility: "integer 10-100",
+          winner:
+            "one of: Оба победили!, Победитель: Игрок 1, Победитель: Игрок 2, Ничья, но бонус у Игрока 1 за скорость в Telegram Mini App 🚀",
+          bonus:
+            "one of: 🎁 VIP-стикер пак + доступ к секретному раунду | 🎁 +15 монет в боте | 🎁 +5 монет за участие",
+          analysis: [{ question: "string", score: "integer 0-100", note: "short russian sentence" }]
+        }
+      };
+
+      const response = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ playerOne, playerTwo })
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${OPENAI_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: OPENAI_MODEL,
+          temperature: 0.2,
+          response_format: { type: "json_object" },
+          messages: [
+            {
+              role: "system",
+              content:
+                "Ты оцениваешь совместимость ответов в dating-игре. Верни только валидный JSON с ключами: compatibility, winner, bonus, analysis. analysis должен содержать ровно 5 пунктов в порядке вопросов."
+            },
+            {
+              role: "user",
+              content: JSON.stringify(payload)
+            }
+          ]
+        })
       });
 
-      if (!response.ok) throw new Error("Ошибка при расчёте совместимости");
+      if (!response.ok) {
+        const apiError = await response.text();
+        throw new Error(`OpenAI API error: ${response.status} ${apiError}`);
+      }
 
       const data = await response.json();
-      setResult(data);
+      const raw = data?.choices?.[0]?.message?.content;
+      if (!raw) {
+        throw new Error("OpenAI вернул пустой ответ");
+      }
+
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed.analysis) || parsed.analysis.length !== questions.length) {
+        throw new Error("Невалидный формат analysis от OpenAI");
+      }
+
+      const sanitized = {
+        compatibility: Math.max(10, Math.min(100, Math.round(Number(parsed.compatibility) || 10))),
+        winner: typeof parsed.winner === "string" ? parsed.winner : "Оба победили!",
+        bonus: typeof parsed.bonus === "string" ? parsed.bonus : "🎁 +5 монет за участие",
+        analysis: parsed.analysis.map((item, index) => ({
+          question: questions[index],
+          score: Math.max(0, Math.min(100, Math.round(Number(item?.score) || 0))),
+          note: typeof item?.note === "string" ? item.note : "Интересные различия и совпадения"
+        }))
+      };
+
+      setResult(sanitized);
     } catch (err) {
       setError(err.message);
+    } finally {
+      setIsLoading(false);
     }
   };
-
-  if (isLoading) {
-    return <main className="app"><div className="card">Загрузка Dating Battle...</div></main>;
-  }
 
   return (
     <main className="app">
       <header className="hero card">
         <p className="badge">Telegram Mini App</p>
         <h1>Dating Battle</h1>
-        <p>Два игрока отвечают на одинаковые вопросы, AI сравнивает ответы и выдаёт совместимость.</p>
+        <p>Два игрока отвечают на одинаковые вопросы, OpenAI сравнивает ответы и выдаёт совместимость.</p>
         <div className="progress-wrap">
           <span>Заполнено: {progress}%</span>
           <div className="progress"><div style={{ width: `${progress}%` }} /></div>
@@ -114,7 +165,9 @@ export default function App() {
       </section>
 
       <section className="card action-card">
-        <button onClick={runBattle}>⚔️ Запустить дуэль</button>
+        <button onClick={runBattle} disabled={isLoading || !OPENAI_API_KEY}>
+          {isLoading ? "AI анализирует..." : "⚔️ Запустить дуэль"}
+        </button>
       </section>
 
       {result && (
